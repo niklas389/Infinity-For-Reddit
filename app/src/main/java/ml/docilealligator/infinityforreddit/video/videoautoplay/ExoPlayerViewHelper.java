@@ -181,6 +181,23 @@ public class ExoPlayerViewHelper extends ToroPlayerHelper {
         return playable.player.getPlayer();
     }
 
+    /** Format of the video track currently playing, or null when no player is attached. */
+    @Nullable
+    public androidx.media3.common.Format getVideoFormat() {
+        return playable.player != null ? playable.player.getPlayer().getVideoFormat() : null;
+    }
+
+    /**
+     * Lends the running player to {@code ViewVideoActivity} (see
+     * {@link ml.docilealligator.infinityforreddit.video.SharedPlayerHandoff}). Call right before
+     * starting the activity and pass the token as {@code ViewVideoActivity.EXTRA_SHARED_PLAYER_TOKEN}.
+     *
+     * @return the token, or 0 if nothing is playing that could be handed over.
+     */
+    public long lendPlayerForFullscreen() {
+        return playable.lendForFullscreen();
+    }
+
     // A proxy, to also hook into ToroPlayerHelper's state change event.
     @UnstableApi
     private class MyEventListeners extends Playable.EventListeners {

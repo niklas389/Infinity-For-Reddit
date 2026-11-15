@@ -17,7 +17,11 @@ import androidx.preference.PreferenceManager;
 
 import java.io.File;
 import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.inject.Named;
 import javax.inject.Singleton;
@@ -234,7 +238,23 @@ abstract class AppModule {
     @Provides
     @Singleton
     static Executor provideExecutor() {
-        return Executors.newFixedThreadPool(4);
+        // Shared by ~400 call sites mixing Room work with blocking network calls (Call.execute(),
+        // 30 s timeouts). With only 4 threads, a few slow requests occupied every thread and all
+        // other background work, including loading content, queued behind them.
+        // Up to 16 threads; idle threads exit after 30 s, so the pool costs nothing when quiet.
+        AtomicInteger threadCount = new AtomicInteger();
+        ThreadFactory threadFactory = runnable -> {
+            Thread thread = new Thread(() -> {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                runnable.run();
+            }, "infinity-bg-" + threadCount.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(16, 16, 30, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(), threadFactory);
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
     }
 
     @Provides

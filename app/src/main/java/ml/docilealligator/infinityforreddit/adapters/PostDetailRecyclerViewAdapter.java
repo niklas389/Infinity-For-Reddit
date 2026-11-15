@@ -33,6 +33,7 @@ import androidx.appcompat.content.res.AppCompatResources;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.constraintlayout.widget.ConstraintSet;
 import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
@@ -72,6 +73,7 @@ import io.noties.markwon.MarkwonPlugin;
 import io.noties.markwon.core.MarkwonTheme;
 import jp.wasabeef.glide.transformations.BlurTransformation;
 import jp.wasabeef.glide.transformations.RoundedCornersTransformation;
+import ml.docilealligator.infinityforreddit.video.AudioTrackPreference;
 import ml.docilealligator.infinityforreddit.video.FetchVideoLinkListener;
 import ml.docilealligator.infinityforreddit.R;
 import ml.docilealligator.infinityforreddit.database.RedditDataRoomDatabase;
@@ -1066,6 +1068,16 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
     }
 
     private void openMedia(Post post, int galleryItemIndex, long videoProgress) {
+        openMedia(post, galleryItemIndex, videoProgress, null);
+    }
+
+    /**
+     * @param inlinePlayer the inline player showing this video, or null. Full screen continues in
+     *                     its player (same buffer and position) when possible, otherwise starts
+     *                     on the variant it was playing.
+     */
+    private void openMedia(Post post, int galleryItemIndex, long videoProgress,
+                           @Nullable ExoPlayerViewHelper inlinePlayer) {
         if (canStartActivity) {
             canStartActivity = false;
             if (post.getPostType() == Post.VIDEO_TYPE) {
@@ -1100,6 +1112,18 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
                     intent.putExtra(ViewVideoActivity.EXTRA_PROGRESS_SECONDS, videoProgress);
                 }
                 intent.putExtra(ViewVideoActivity.EXTRA_IS_NSFW, post.isNSFW());
+                if (inlinePlayer != null) {
+                    Format videoFormat = inlinePlayer.getVideoFormat();
+                    if (videoFormat != null && videoFormat.bitrate > 0) {
+                        // Used only if full screen cannot take over the player itself.
+                        intent.putExtra(ViewVideoActivity.EXTRA_INITIAL_VIDEO_BITRATE, videoFormat.bitrate);
+                    }
+                    // Last step before starting: hand the running player over.
+                    long sharedPlayerToken = inlinePlayer.lendPlayerForFullscreen();
+                    if (sharedPlayerToken != 0) {
+                        intent.putExtra(ViewVideoActivity.EXTRA_SHARED_PLAYER_TOKEN, sharedPlayerToken);
+                    }
+                }
                 mActivity.startActivity(intent);
             } else if (post.getPostType() == Post.IMAGE_TYPE) {
                 Intent intent = new Intent(mActivity, ViewImageOrGifActivity.class);
@@ -1882,7 +1906,7 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
 
             fullscreenButton.setOnClickListener(view -> {
                 if (helper != null) {
-                    openMedia(mPost, helper.getLatestPlaybackInfo().getResumePosition());
+                    openMedia(mPost, 0, helper.getLatestPlaybackInfo().getResumePosition(), helper);
                 } else {
                     openMedia(mPost);
                 }
@@ -2069,6 +2093,7 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
                             for (int i = 0; i < trackGroups.size(); i++) {
                                 String mimeType = trackGroups.get(i).getTrackFormat(0).sampleMimeType;
                                 if (mimeType != null && mimeType.contains("audio")) {
+                                    AudioTrackPreference.preferStereo(helper.getPlayer(), trackGroups.get(i));
                                     helper.setVolume(volume);
                                     muteButton.setVisibility(View.VISIBLE);
                                     if (volume != 0f) {

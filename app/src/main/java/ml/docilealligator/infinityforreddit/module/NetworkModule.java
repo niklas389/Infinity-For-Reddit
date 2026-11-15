@@ -14,11 +14,13 @@ import javax.inject.Singleton;
 
 import dagger.Module;
 import dagger.Provides;
+import ml.docilealligator.infinityforreddit.BuildConfig;
 import ml.docilealligator.infinityforreddit.database.RedditDataRoomDatabase;
 import ml.docilealligator.infinityforreddit.apis.StreamableAPI;
 import ml.docilealligator.infinityforreddit.apis.StreamableAPIKt;
 import ml.docilealligator.infinityforreddit.network.AccessTokenAuthenticator;
 import ml.docilealligator.infinityforreddit.network.AnonymousAccessTokenInterceptor;
+import ml.docilealligator.infinityforreddit.network.NetworkTimingEventListener;
 import ml.docilealligator.infinityforreddit.network.RedgifsAccessTokenAuthenticator;
 import ml.docilealligator.infinityforreddit.network.ServerAccessTokenAuthenticator;
 import ml.docilealligator.infinityforreddit.network.SortTypeConverterFactory;
@@ -60,6 +62,11 @@ abstract class NetworkModule {
                     }
                 });
 
+        if (BuildConfig.DEBUG) {
+            // Inherited by every client derived from this one via newBuilder().
+            builder.eventListenerFactory(NetworkTimingEventListener.FACTORY);
+        }
+
         if (proxyEnabled) {
             Proxy.Type proxyType = Proxy.Type.valueOf(mProxySharedPreferences.getString(SharedPreferencesUtils.PROXY_TYPE, "HTTP"));
             if (proxyType != Proxy.Type.DIRECT) {
@@ -88,9 +95,19 @@ abstract class NetworkModule {
                 .build();
     }
 
+    /**
+     * One pool shared by the API, Redgifs and media3 clients so TCP/TLS connections (and HTTP/2
+     * sessions) are reused across requests. The previous pool kept zero idle connections, which
+     * forced a full DNS + TCP + TLS handshake for every API call and every HLS segment.
+     * <p>
+     * The keep-alive is shorter than OkHttp's 5-minute default to limit reuse of connections a
+     * server or middlebox may already have closed; OkHttp retries such stale-connection failures
+     * on a new connection (retryOnConnectionFailure is enabled by default).
+     */
     @Provides
+    @Singleton
     static ConnectionPool provideConnectionPool() {
-        return new ConnectionPool(0, 1, TimeUnit.NANOSECONDS);
+        return new ConnectionPool(10, 1, TimeUnit.MINUTES);
     }
 
     @Provides

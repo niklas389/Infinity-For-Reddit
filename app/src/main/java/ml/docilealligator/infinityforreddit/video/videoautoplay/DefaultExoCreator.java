@@ -46,6 +46,7 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter;
 import java.io.IOException;
 
 import ml.docilealligator.infinityforreddit.utils.APIUtils;
+import ml.docilealligator.infinityforreddit.video.PlaybackTimingListener;
 
 /**
  * Usage: use this as-it or inheritance.
@@ -58,9 +59,11 @@ import ml.docilealligator.infinityforreddit.utils.APIUtils;
 @SuppressWarnings({"unused", "WeakerAccess"}) //
 public class DefaultExoCreator implements ExoCreator, MediaSourceEventListener {
 
+    private static final int FEED_BUFFER_FOR_PLAYBACK_MS = 1000;
+    private static final int FEED_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2000;
+
     final ToroExo toro;  // per application
     final Config config;
-    private final TrackSelector trackSelector;  // 'maybe' stateless
     private final MediaSourceBuilder mediaSourceBuilder;  // stateless
     private final RenderersFactory renderersFactory;  // stateless
     private final DataSource.Factory mediaDataSourceFactory;  // stateless
@@ -69,7 +72,6 @@ public class DefaultExoCreator implements ExoCreator, MediaSourceEventListener {
     public DefaultExoCreator(@NonNull ToroExo toro, @NonNull Config config) {
         this.toro = checkNotNull(toro);
         this.config = checkNotNull(config);
-        trackSelector = new DefaultTrackSelector(toro.context);
         mediaSourceBuilder = config.mediaSourceBuilder;
 
         DefaultRenderersFactory tempFactory = new DefaultRenderersFactory(this.toro.context);
@@ -100,7 +102,6 @@ public class DefaultExoCreator implements ExoCreator, MediaSourceEventListener {
         DefaultExoCreator that = (DefaultExoCreator) o;
 
         if (!toro.equals(that.toro)) return false;
-        if (!trackSelector.equals(that.trackSelector)) return false;
         if (!mediaSourceBuilder.equals(that.mediaSourceBuilder)) return false;
         if (!renderersFactory.equals(that.renderersFactory)) return false;
         if (!mediaDataSourceFactory.equals(that.mediaDataSourceFactory)) return false;
@@ -110,16 +111,11 @@ public class DefaultExoCreator implements ExoCreator, MediaSourceEventListener {
     @Override
     public int hashCode() {
         int result = toro.hashCode();
-        result = 31 * result + trackSelector.hashCode();
         result = 31 * result + mediaSourceBuilder.hashCode();
         result = 31 * result + renderersFactory.hashCode();
         result = 31 * result + mediaDataSourceFactory.hashCode();
         result = 31 * result + manifestDataSourceFactory.hashCode();
         return result;
-    }
-
-    final TrackSelector getTrackSelector() {
-        return trackSelector;
     }
 
     @Nullable
@@ -131,8 +127,24 @@ public class DefaultExoCreator implements ExoCreator, MediaSourceEventListener {
     @NonNull
     @Override
     public ExoPlayer createPlayer() {
-        return new ToroExoPlayer(toro.context, renderersFactory, trackSelector, new DefaultLoadControl(),
-                new DefaultBandwidthMeter.Builder(toro.context).build(), Util.getCurrentOrMainLooper()).getPlayer();
+        // Feed autoplay: start rendering once 1 s is buffered (default 2.5 s) and resume after a
+        // stall at 2 s (default 5 s). Min/max buffer sizes keep their defaults.
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                        DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
+                        FEED_BUFFER_FOR_PLAYBACK_MS,
+                        FEED_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS)
+                .build();
+        // Process-wide bandwidth estimate shared with the full-screen player (ExoPlayer.Builder's
+        // default), instead of a fresh, cold estimate per feed player.
+        // One track selector per player: track overrides (default resolution, stereo audio, the
+        // quality menu) must only affect that player, also while it is shown full screen.
+        TrackSelector trackSelector = new DefaultTrackSelector(toro.context);
+        ExoPlayer player = new ToroExoPlayer(toro.context, renderersFactory, trackSelector, loadControl,
+                DefaultBandwidthMeter.getSingletonInstance(toro.context), Util.getCurrentOrMainLooper()).getPlayer();
+        PlaybackTimingListener.attachIfDebug(player, "feed");
+        return player;
     }
 
     @NonNull
