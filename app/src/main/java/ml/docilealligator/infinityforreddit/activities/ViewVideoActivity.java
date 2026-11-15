@@ -37,6 +37,7 @@ import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.OptIn;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -90,6 +91,7 @@ import javax.inject.Provider;
 import app.futured.hauler.DragDirection;
 import ml.docilealligator.infinityforreddit.video.PlaybackTimingListener;
 import ml.docilealligator.infinityforreddit.video.SeededBandwidthMeter;
+import ml.docilealligator.infinityforreddit.video.SharedPlayerHandoff;
 import ml.docilealligator.infinityforreddit.CustomFontReceiver;
 import ml.docilealligator.infinityforreddit.Infinity;
 import ml.docilealligator.infinityforreddit.state.LiveDataState;
@@ -142,6 +144,11 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
      * Full-screen playback starts on that variant so already cached segments are reused.
      */
     public static final String EXTRA_INITIAL_VIDEO_BITRATE = "EIVB";
+    /**
+     * Optional {@link SharedPlayerHandoff} token: play in the inline player's own ExoPlayer instead
+     * of creating one, so the video continues without reloading.
+     */
+    public static final String EXTRA_SHARED_PLAYER_TOKEN = "ESPT";
     public static final int VIDEO_TYPE_MARKDOWN_PARSED = 8;
     public static final int VIDEO_TYPE_IMGUR = 7;
     public static final int VIDEO_TYPE_STREAMABLE = 5;
@@ -158,6 +165,14 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
     private DefaultTrackSelector trackSelector;
     private DataSource.Factory dataSourceFactory;
     private Player.Listener playerListener;
+    @Nullable
+    private Player.Listener zoomVideoSizeListener;
+    // Shared-player mode: the player belongs to an inline (feed / post screen) player and must be
+    // handed back, never stopped or released, when this screen finishes.
+    private long sharedPlayerToken;
+    private boolean usingSharedPlayer;
+    private boolean sharedPlayerConfigured;
+    private boolean sharedPlayerReturned;
 
     private Integer originalOrientation;
     private boolean useBottomToolbar;
@@ -372,7 +387,7 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
         ).get(ViewVideoViewModel.class);
 
         binding.getHaulerView().setOnDragDismissedListener(dragDirection -> {
-            player.stop();
+            stopPlayback();
             int slide = dragDirection == DragDirection.UP ? R.anim.slide_out_up : R.anim.slide_out_down;
             finish();
             overridePendingTransition(0, slide);
@@ -413,18 +428,33 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
             }
         }
 
-        trackSelector = new DefaultTrackSelector(this);
-        // Only on first creation: after a configuration change the player should adapt freely
-        // rather than drop back to the feed's quality.
-        BandwidthMeter bandwidthMeter = SeededBandwidthMeter.create(this,
-                savedInstanceState == null ? intent.getIntExtra(EXTRA_INITIAL_VIDEO_BITRATE, -1) : -1);
-        player = new ExoPlayer.Builder(this)
-                .setTrackSelector(trackSelector)
-                .setBandwidthMeter(bandwidthMeter)
-                .setRenderersFactory(new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
-                .build();
-        SeededBandwidthMeter.releaseSeedAfterFirstLoad(bandwidthMeter, player);
-        PlaybackTimingListener.attachIfDebug(player, "fullscreen");
+        sharedPlayerToken = intent.getLongExtra(EXTRA_SHARED_PLAYER_TOKEN, 0);
+        ExoPlayer sharedPlayer = SharedPlayerHandoff.claim(sharedPlayerToken,
+                intent.getData() != null ? intent.getData().toString() : null);
+        if (sharedPlayer != null && sharedPlayer.getTrackSelector() instanceof DefaultTrackSelector) {
+            // Continue in the inline player: same buffer, position and quality. It keeps adapting
+            // (usually upwards, at a segment boundary) without interrupting playback.
+            usingSharedPlayer = true;
+            player = sharedPlayer;
+            trackSelector = (DefaultTrackSelector) sharedPlayer.getTrackSelector();
+        } else {
+            if (sharedPlayer != null) {
+                SharedPlayerHandoff.giveBack(sharedPlayerToken);
+            }
+            sharedPlayerToken = 0;
+            trackSelector = new DefaultTrackSelector(this);
+            // Only on first creation: after a configuration change the player should adapt freely
+            // rather than drop back to the feed's quality.
+            BandwidthMeter bandwidthMeter = SeededBandwidthMeter.create(this,
+                    savedInstanceState == null ? intent.getIntExtra(EXTRA_INITIAL_VIDEO_BITRATE, -1) : -1);
+            player = new ExoPlayer.Builder(this)
+                    .setTrackSelector(trackSelector)
+                    .setBandwidthMeter(bandwidthMeter)
+                    .setRenderersFactory(new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
+                    .build();
+            SeededBandwidthMeter.releaseSeedAfterFirstLoad(bandwidthMeter, player);
+            PlaybackTimingListener.attachIfDebug(player, "fullscreen");
+        }
 
         if (zoomable) {
             PlayerControlView playerControlView = findViewById(R.id.player_control_view_view_video_activity);
@@ -457,7 +487,7 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
             playerControlView.setPlayer(player);
 
             ZoomSurfaceView zoomSurfaceView = findViewById(R.id.zoom_surface_view_view_video_activity);
-            player.addListener(new Player.Listener() {
+            zoomVideoSizeListener = new Player.Listener() {
                 @Override
                 public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
                     try {
@@ -466,7 +496,17 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
                         e.printStackTrace();
                     }
                 }
-            });
+            };
+            player.addListener(zoomVideoSizeListener);
+            VideoSize currentVideoSize = player.getVideoSize();
+            if (usingSharedPlayer && currentVideoSize.width > 0 && currentVideoSize.height > 0) {
+                // A shared player already knows its size; no size change event will follow.
+                try {
+                    zoomSurfaceView.setContentSize(currentVideoSize.width, currentVideoSize.height);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
             zoomSurfaceView.addCallback(new ZoomSurfaceView.Callback() {
                 @Override
                 public void onZoomSurfaceCreated(@NonNull ZoomSurfaceView zoomSurfaceView) {
@@ -685,6 +725,16 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
             }
         };
         player.addListener(playerListener);
+        if (usingSharedPlayer) {
+            // The shared player's tracks are already known, so onTracksChanged will not fire on
+            // its own: run it once for the mute button, stereo audio and default resolution.
+            // Overrides equal to what the inline player already applied are no-ops.
+            playerListener.onTracksChanged(player.getCurrentTracks());
+            binding.getPlayPauseButton().setIcon(Util.shouldShowPlayButton(player) ? playDrawable : pauseDrawable);
+            if (player.isPlaying()) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        }
 
         // Produces DataSource instances through which media data is loaded.
         dataSourceFactory = new CacheDataSource.Factory().setCache(mSimpleCache)
@@ -693,7 +743,7 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
         getOnBackPressedDispatcher().addCallback(new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                player.stop();
+                stopPlayback();
                 setEnabled(false);
                 getOnBackPressedDispatcher().onBackPressed();
             }
@@ -707,6 +757,17 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
                         mStreamableApiProvider, mCurrentAccountSharedPreferences);
             } else {
                 binding.getLoadingIndicator().setVisibility(View.GONE);
+                if (usingSharedPlayer) {
+                    if (!sharedPlayerConfigured) {
+                        // Already prepared and playing this URI: only apply full-screen settings.
+                        sharedPlayerConfigured = true;
+                        viewVideoViewModel.setResumePosition(-1);
+                        preparePlayer(savedInstanceState);
+                        return;
+                    }
+                    // A later URI (e.g. the fallback after an error) replaces the inline media.
+                    SharedPlayerHandoff.markMediaReplaced(sharedPlayerToken);
+                }
                 if (viewVideoViewModel.getVideoType() == VIDEO_TYPE_NORMAL || viewVideoViewModel.getVideoType() == VIDEO_TYPE_MARKDOWN_PARSED) {
                     // Prepare the player with the source.
                     player.prepare();
@@ -781,7 +842,66 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
             player.setVolume(0f);
             binding.getMuteButton().setIconResource(R.drawable.ic_mute_24dp);
         } else {
+            // Explicit: a shared inline player may arrive muted.
+            player.setVolume(1f);
             binding.getMuteButton().setIconResource(R.drawable.ic_unmute_24dp);
+        }
+    }
+
+    /** Stops playback before finishing; a shared player is only paused so it can be handed back. */
+    private void stopPlayback() {
+        if (usingSharedPlayer) {
+            if (!sharedPlayerReturned) {
+                player.pause();
+            }
+        } else {
+            player.stop();
+        }
+    }
+
+    /**
+     * Detaches this screen from the shared player.
+     *
+     * @param giveBack true to return it to the inline player; false only detaches (configuration
+     *                 change: the recreated activity claims it again).
+     */
+    private void detachSharedPlayer(boolean giveBack) {
+        if (!usingSharedPlayer || sharedPlayerReturned) {
+            return;
+        }
+        player.pause();
+        if (playerListener != null) {
+            player.removeListener(playerListener);
+        }
+        if (zoomVideoSizeListener != null) {
+            player.removeListener(zoomVideoSizeListener);
+        }
+        PlayerControlView playerControlView = findViewById(R.id.player_control_view_view_video_activity);
+        if (playerControlView != null) {
+            playerControlView.setPlayer(null);
+        }
+        PlayerView videoPlayerView = findViewById(R.id.player_view_view_video_activity);
+        if (videoPlayerView != null) {
+            videoPlayerView.setPlayer(null);
+        }
+        ZoomSurfaceView zoomSurfaceView = findViewById(R.id.zoom_surface_view_view_video_activity);
+        if (zoomSurfaceView != null && zoomSurfaceView.getSurface() != null) {
+            player.clearVideoSurface(zoomSurfaceView.getSurface());
+        }
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        sharedPlayerReturned = true;
+        if (giveBack) {
+            SharedPlayerHandoff.giveBack(sharedPlayerToken);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Hand back now: the inline screen resumes before this activity's onStop/onDestroy and
+        // must find its player available.
+        if (isFinishing()) {
+            detachSharedPlayer(true);
         }
     }
 
@@ -806,6 +926,10 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
     protected void onDestroy() {
         EventBus.getDefault().unregister(this);
         super.onDestroy();
+        if (usingSharedPlayer) {
+            detachSharedPlayer(!isChangingConfigurations());
+            return;
+        }
         if (playerListener != null) {
             player.removeListener(playerListener);
         }
@@ -869,6 +993,9 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
     @Override
     protected void onStart() {
         super.onStart();
+        if (sharedPlayerReturned) {
+            return;
+        }
         if (viewVideoViewModel.getWasPlaying()) {
             player.setPlayWhenReady(true);
         }
@@ -877,8 +1004,10 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
     @Override
     protected void onStop() {
         super.onStop();
-        viewVideoViewModel.setWasPlaying(player.getPlayWhenReady());
-        player.setPlayWhenReady(false);
+        if (!sharedPlayerReturned) {
+            viewVideoViewModel.setWasPlaying(player.getPlayWhenReady());
+            player.setPlayWhenReady(false);
+        }
         if (originalOrientation != null) {
             try {
                 setRequestedOrientation(originalOrientation);

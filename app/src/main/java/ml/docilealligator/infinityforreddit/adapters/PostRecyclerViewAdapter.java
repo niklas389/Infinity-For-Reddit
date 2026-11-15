@@ -77,6 +77,7 @@ import javax.inject.Provider;
 
 import jp.wasabeef.glide.transformations.BlurTransformation;
 import jp.wasabeef.glide.transformations.RoundedCornersTransformation;
+import ml.docilealligator.infinityforreddit.video.AudioTrackPreference;
 import ml.docilealligator.infinityforreddit.video.FetchVideoLinkListener;
 import ml.docilealligator.infinityforreddit.PostGalleryGridLayoutItemDecoration;
 import ml.docilealligator.infinityforreddit.R;
@@ -2015,15 +2016,16 @@ public class PostRecyclerViewAdapter extends PagingDataAdapter<Post, RecyclerVie
     }
 
     private void openMedia(Post post, int galleryItemIndex, long videoProgress, boolean peekMedia) {
-        openMedia(post, galleryItemIndex, videoProgress, Format.NO_VALUE, peekMedia);
+        openMedia(post, galleryItemIndex, videoProgress, null, peekMedia);
     }
 
     /**
-     * @param initialVideoBitrate bitrate of the variant the inline player was showing, or
-     *                            {@link Format#NO_VALUE}; passed on so full screen starts on it.
+     * @param inlinePlayer the inline player showing this video, or null. Full screen continues in
+     *                     its player (same buffer and position) when possible, otherwise starts
+     *                     on the variant it was playing.
      */
-    private void openMedia(Post post, int galleryItemIndex, long videoProgress, int initialVideoBitrate,
-                           boolean peekMedia) {
+    private void openMedia(Post post, int galleryItemIndex, long videoProgress,
+                           @Nullable ExoPlayerViewHelper inlinePlayer, boolean peekMedia) {
         if (canStartActivity) {
             canStartActivity = false;
             if (post.getPostType() == Post.VIDEO_TYPE) {
@@ -2061,10 +2063,19 @@ public class PostRecyclerViewAdapter extends PagingDataAdapter<Post, RecyclerVie
                 if (videoProgress > 0) {
                     intent.putExtra(ViewVideoActivity.EXTRA_PROGRESS_SECONDS, videoProgress);
                 }
-                if (initialVideoBitrate > 0) {
-                    intent.putExtra(ViewVideoActivity.EXTRA_INITIAL_VIDEO_BITRATE, initialVideoBitrate);
-                }
                 intent.putExtra(ViewVideoActivity.EXTRA_IS_NSFW, post.isNSFW());
+                if (inlinePlayer != null) {
+                    Format videoFormat = inlinePlayer.getVideoFormat();
+                    if (videoFormat != null && videoFormat.bitrate > 0) {
+                        // Used only if full screen cannot take over the player itself.
+                        intent.putExtra(ViewVideoActivity.EXTRA_INITIAL_VIDEO_BITRATE, videoFormat.bitrate);
+                    }
+                    // Last step before starting: hand the running player over.
+                    long sharedPlayerToken = inlinePlayer.lendPlayerForFullscreen();
+                    if (sharedPlayerToken != 0) {
+                        intent.putExtra(ViewVideoActivity.EXTRA_SHARED_PLAYER_TOKEN, sharedPlayerToken);
+                    }
+                }
                 mActivity.startActivity(intent);
             } else if (post.getPostType() == Post.IMAGE_TYPE) {
                 if (peekMedia) {
@@ -2841,9 +2852,7 @@ public class PostRecyclerViewAdapter extends PagingDataAdapter<Post, RecyclerVie
                     markPostRead(post, true);
 
                     if (helper != null) {
-                        Format videoFormat = helper.getVideoFormat();
-                        openMedia(post, 0, helper.getLatestPlaybackInfo().getResumePosition(),
-                                videoFormat != null ? videoFormat.bitrate : Format.NO_VALUE, false);
+                        openMedia(post, 0, helper.getLatestPlaybackInfo().getResumePosition(), helper, false);
                     } else {
                         openMedia(post, -1);
                     }
@@ -3092,6 +3101,7 @@ public class PostRecyclerViewAdapter extends PagingDataAdapter<Post, RecyclerVie
                             for (int i = 0; i < trackGroups.size(); i++) {
                                 String mimeType = trackGroups.get(i).getTrackFormat(0).sampleMimeType;
                                 if (mimeType != null && mimeType.contains("audio")) {
+                                    AudioTrackPreference.preferStereo(helper.getPlayer(), trackGroups.get(i));
                                     if (mFragment.getMasterMutingOption() != null) {
                                         volume = mFragment.getMasterMutingOption() ? 0f : 1f;
                                     }

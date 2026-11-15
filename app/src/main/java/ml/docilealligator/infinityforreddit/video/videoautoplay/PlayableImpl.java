@@ -31,9 +31,11 @@ import androidx.media3.common.C;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.ui.PlayerView;
 
+import ml.docilealligator.infinityforreddit.video.SharedPlayerHandoff;
 import ml.docilealligator.infinityforreddit.video.videoautoplay.media.PlaybackInfo;
 import ml.docilealligator.infinityforreddit.video.videoautoplay.media.VolumeInfo;
 
@@ -68,6 +70,26 @@ class PlayableImpl implements Playable {
     private boolean sourcePrepared = false;
     private boolean listenerApplied = false;
 
+    // Full-screen hand-off. While lendToken != 0 the player belongs to ViewVideoActivity: this
+    // Playable keeps the reference but must not touch the player, and reports "not playing" so
+    // the Container leaves it alone.
+    private long lendToken = 0;
+    private int lentRepeatMode = Player.REPEAT_MODE_OFF;
+    private PlaybackParameters lentPlaybackParameters = PlaybackParameters.DEFAULT;
+
+    private final SharedPlayerHandoff.Lender lender = new SharedPlayerHandoff.Lender() {
+        @Override
+        public void onPlayerReturned(@NonNull ExoPlayer returned, boolean mediaReplaced) {
+            reclaimPlayer(returned, mediaReplaced);
+        }
+
+        @Override
+        public void onPlayerDiscarded(@NonNull ExoPlayer discarded) {
+            lendToken = 0;
+            discardPlayer(discarded);
+        }
+    };
+
     PlayableImpl(ExoCreator creator, Uri uri, String fileExt) {
         this.creator = creator;
         this.mediaUri = uri;
@@ -77,7 +99,7 @@ class PlayableImpl implements Playable {
     @CallSuper
     @Override
     public void prepare(boolean prepareSource) {
-        if (prepareSource) {
+        if (prepareSource && !isLent()) {
             ensureMediaSource();
             ensurePlayerView();
         }
@@ -87,6 +109,11 @@ class PlayableImpl implements Playable {
     @Override
     public void setPlayerView(@Nullable PlayerView playerView) {
         if (this.playerView == playerView) return;
+        if (isLent()) {
+            // The player is shown full screen; attach to the new view when it comes back.
+            this.playerView = playerView;
+            return;
+        }
         if (playerView == null) {
             this.playerView.setPlayer(null);
         } else {
@@ -106,6 +133,11 @@ class PlayableImpl implements Playable {
     @CallSuper
     @Override
     public void play() {
+        if (isLent()) {
+            // Taking the player back is only possible if the full-screen screen never claimed it.
+            SharedPlayerHandoff.cancelIfUnclaimed(lendToken);
+            if (isLent()) return;
+        }
         ensureMediaSource();
         ensurePlayerView();
         checkNotNull(player, "Playable#play(): Player is null!");
@@ -116,6 +148,7 @@ class PlayableImpl implements Playable {
     @Override
     public void pause() {
         // Player is not required to be non-null here.
+        if (isLent()) return;
         if (player != null) player.getPlayer().setPlayWhenReady(false);
     }
 
@@ -123,7 +156,7 @@ class PlayableImpl implements Playable {
     @Override
     public void reset() {
         this.playbackInfo.reset();
-        if (player != null) {
+        if (player != null && !isLent()) {
             // reset volume to default
             ToroExo.setVolumeInfo(this.player, new VolumeInfo(false, 1.f));
             player.getPlayer().stop();
@@ -136,6 +169,17 @@ class PlayableImpl implements Playable {
     @CallSuper
     @Override
     public void release() {
+        if (isLent()) {
+            // The full-screen screen still uses the player; it is discarded when that ends.
+            long token = lendToken;
+            this.playerView = null;
+            this.player = null;
+            this.mediaSource = null;
+            this.sourcePrepared = false;
+            this.listenerApplied = false;
+            SharedPlayerHandoff.abandon(token);
+            return;
+        }
         this.setPlayerView(null);
         if (this.player != null) {
             // reset volume to default
@@ -173,7 +217,7 @@ class PlayableImpl implements Playable {
         this.playbackInfo.setResumePosition(playbackInfo.getResumePosition());
         this.setVolumeInfo(playbackInfo.getVolumeInfo());
 
-        if (player != null) {
+        if (player != null && !isLent()) {
             ToroExo.setVolumeInfo(player, this.playbackInfo.getVolumeInfo());
             boolean haveResumePosition = this.playbackInfo.getResumeWindow() != INDEX_UNSET;
             if (haveResumePosition) {
@@ -196,6 +240,11 @@ class PlayableImpl implements Playable {
     @CallSuper
     @Override
     public void setVolume(float volume) {
+        if (isLent()) {
+            // Remembered and applied when the player comes back.
+            playbackInfo.getVolumeInfo().setTo(volume == 0, volume);
+            return;
+        }
         checkNotNull(player, "Playable#setVolume(): Player is null!");
         playbackInfo.getVolumeInfo().setTo(volume == 0, volume);
         ToroExo.setVolumeInfo(player, this.playbackInfo.getVolumeInfo());
@@ -204,6 +253,10 @@ class PlayableImpl implements Playable {
     @CallSuper
     @Override
     public float getVolume() {
+        if (isLent()) {
+            VolumeInfo volumeInfo = playbackInfo.getVolumeInfo();
+            return volumeInfo.isMute() ? 0 : volumeInfo.getVolume();
+        }
         return checkNotNull(player.getPlayer(), "Playable#getVolume(): Player is null!").getVolume();
     }
 
@@ -212,7 +265,7 @@ class PlayableImpl implements Playable {
         boolean changed = !this.playbackInfo.getVolumeInfo().equals(checkNotNull(volumeInfo));
         if (changed) {
             this.playbackInfo.getVolumeInfo().setTo(volumeInfo.isMute(), volumeInfo.getVolume());
-            if (player != null) ToroExo.setVolumeInfo(player, this.playbackInfo.getVolumeInfo());
+            if (player != null && !isLent()) ToroExo.setVolumeInfo(player, this.playbackInfo.getVolumeInfo());
         }
         return changed;
     }
@@ -225,12 +278,17 @@ class PlayableImpl implements Playable {
 
     @Override
     public void setParameters(@Nullable PlaybackParameters parameters) {
+        if (isLent()) {
+            lentPlaybackParameters = parameters != null ? parameters : PlaybackParameters.DEFAULT;
+            return;
+        }
         checkNotNull(player.getPlayer(), "Playable#setParameters(PlaybackParameters): Player is null") //
                 .setPlaybackParameters(parameters);
     }
 
     @Override
     public PlaybackParameters getParameters() {
+        if (isLent()) return lentPlaybackParameters;
         return checkNotNull(player.getPlayer(), "Playable#getParameters(): Player is null").getPlaybackParameters();
     }
 
@@ -246,7 +304,7 @@ class PlayableImpl implements Playable {
 
     @Override
     public boolean isPlaying() {
-        return player != null && player.getPlayer().getPlayWhenReady();
+        return player != null && !isLent() && player.getPlayer().getPlayWhenReady();
     }
 
     @Override
@@ -260,7 +318,7 @@ class PlayableImpl implements Playable {
     }
 
     final void updatePlaybackInfo() {
-        if (player == null || player.getPlayer().getPlaybackState() == Player.STATE_IDLE) return;
+        if (player == null || isLent() || player.getPlayer().getPlaybackState() == Player.STATE_IDLE) return;
         playbackInfo.setResumeWindow(player.getPlayer().getCurrentWindowIndex());
         playbackInfo.setResumePosition(player.getPlayer().isCurrentWindowSeekable() ? //
                 Math.max(0, player.getPlayer().getCurrentPosition()) : TIME_UNSET);
@@ -304,6 +362,82 @@ class PlayableImpl implements Playable {
         boolean haveResumePosition = playbackInfo.getResumeWindow() != C.INDEX_UNSET;
         if (haveResumePosition) {
             player.getPlayer().seekTo(playbackInfo.getResumeWindow(), playbackInfo.getResumePosition());
+        }
+    }
+
+    final boolean isLent() {
+        return lendToken != 0;
+    }
+
+    /**
+     * Hands the prepared player to the full-screen screen without stopping it.
+     *
+     * @return the hand-off token for the intent, or 0 if there is no prepared player to lend.
+     */
+    final long lendForFullscreen() {
+        if (isLent() || player == null || !sourcePrepared || mediaUri == null) return 0;
+        ExoPlayer exoPlayer = player.getPlayer();
+        if (exoPlayer.getPlaybackState() == Player.STATE_IDLE) return 0;
+
+        updatePlaybackInfo(); // keeps this Playable's own volume and position
+        lentRepeatMode = exoPlayer.getRepeatMode();
+        lentPlaybackParameters = exoPlayer.getPlaybackParameters();
+        // Inline listeners (default resolution, mute button, error fallback) must not react to
+        // what the full-screen screen does with the player.
+        if (listenerApplied) {
+            exoPlayer.removeListener(listeners);
+            player.removeOnVolumeChangeListener(volumeChangeListeners);
+            listenerApplied = false;
+        }
+        if (playerView != null) playerView.setPlayer(null);
+
+        lendToken = SharedPlayerHandoff.lend(exoPlayer, mediaUri.toString(), lender);
+        return lendToken;
+    }
+
+    private void reclaimPlayer(@NonNull ExoPlayer returned, boolean mediaReplaced) {
+        lendToken = 0;
+        if (player == null || player.getPlayer() != returned) {
+            discardPlayer(returned);
+            return;
+        }
+
+        returned.setPlayWhenReady(false); // the Container decides when to play again
+        returned.setRepeatMode(lentRepeatMode);
+        returned.setPlaybackParameters(lentPlaybackParameters);
+
+        if (mediaReplaced || !sourcePrepared) {
+            returned.stop();
+            returned.clearMediaItems();
+            mediaSource = null;
+            sourcePrepared = false;
+        } else {
+            // Continue where full screen left off.
+            playbackInfo.setResumeWindow(returned.getCurrentMediaItemIndex());
+            playbackInfo.setResumePosition(returned.isCurrentMediaItemSeekable()
+                    ? Math.max(0, returned.getCurrentPosition()) : TIME_UNSET);
+        }
+
+        player.addOnVolumeChangeListener(volumeChangeListeners);
+        returned.addListener(listeners);
+        listenerApplied = true;
+
+        // Back to the inline volume. Set on the ExoPlayer directly as well: the wrapper skips the
+        // call when its cached value is unchanged, but full screen changed the real volume.
+        VolumeInfo volumeInfo = playbackInfo.getVolumeInfo();
+        ToroExo.setVolumeInfo(player, volumeInfo);
+        returned.setVolume(volumeInfo.isMute() ? 0 : volumeInfo.getVolume());
+
+        if (playerView != null) playerView.setPlayer(returned);
+    }
+
+    private void discardPlayer(@NonNull ExoPlayer discarded) {
+        discarded.setPlayWhenReady(false);
+        discarded.stop();
+        discarded.clearMediaItems();
+        if (!with(checkNotNull(creator.getContext(), "ExoCreator has no Context"))
+                .releasePlayer(this.creator, discarded)) {
+            discarded.release(); // pool is full
         }
     }
 
