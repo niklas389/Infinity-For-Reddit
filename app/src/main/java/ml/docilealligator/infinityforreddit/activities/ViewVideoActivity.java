@@ -87,6 +87,7 @@ import javax.inject.Named;
 import javax.inject.Provider;
 
 import app.futured.hauler.DragDirection;
+import ml.docilealligator.infinityforreddit.video.PlaybackTimingListener;
 import ml.docilealligator.infinityforreddit.CustomFontReceiver;
 import ml.docilealligator.infinityforreddit.Infinity;
 import ml.docilealligator.infinityforreddit.state.LiveDataState;
@@ -410,6 +411,7 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
                 .setTrackSelector(trackSelector)
                 .setRenderersFactory(new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .build();
+        PlaybackTimingListener.attachIfDebug(player, "fullscreen");
 
         if (zoomable) {
             PlayerControlView playerControlView = findViewById(R.id.player_control_view_view_video_activity);
