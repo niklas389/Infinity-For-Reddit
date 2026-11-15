@@ -68,6 +68,7 @@ import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.ui.PlayerControlView;
 import androidx.media3.ui.PlayerView;
 import androidx.media3.ui.TrackSelectionDialogBuilder;
@@ -88,6 +89,7 @@ import javax.inject.Provider;
 
 import app.futured.hauler.DragDirection;
 import ml.docilealligator.infinityforreddit.video.PlaybackTimingListener;
+import ml.docilealligator.infinityforreddit.video.SeededBandwidthMeter;
 import ml.docilealligator.infinityforreddit.CustomFontReceiver;
 import ml.docilealligator.infinityforreddit.Infinity;
 import ml.docilealligator.infinityforreddit.state.LiveDataState;
@@ -135,6 +137,11 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
     public static final String EXTRA_STREAMABLE_SHORT_CODE = "ESSC";
     public static final String EXTRA_IS_NSFW = "EIN";
     public static final String EXTRA_VIDEO_TYPE = "EVT";
+    /**
+     * Optional {@code Format.bitrate} of the HLS variant an inline (feed) player was showing.
+     * Full-screen playback starts on that variant so already cached segments are reused.
+     */
+    public static final String EXTRA_INITIAL_VIDEO_BITRATE = "EIVB";
     public static final int VIDEO_TYPE_MARKDOWN_PARSED = 8;
     public static final int VIDEO_TYPE_IMGUR = 7;
     public static final int VIDEO_TYPE_STREAMABLE = 5;
@@ -407,10 +414,16 @@ public class ViewVideoActivity extends AppCompatActivity implements CustomFontRe
         }
 
         trackSelector = new DefaultTrackSelector(this);
+        // Only on first creation: after a configuration change the player should adapt freely
+        // rather than drop back to the feed's quality.
+        BandwidthMeter bandwidthMeter = SeededBandwidthMeter.create(this,
+                savedInstanceState == null ? intent.getIntExtra(EXTRA_INITIAL_VIDEO_BITRATE, -1) : -1);
         player = new ExoPlayer.Builder(this)
                 .setTrackSelector(trackSelector)
+                .setBandwidthMeter(bandwidthMeter)
                 .setRenderersFactory(new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .build();
+        SeededBandwidthMeter.releaseSeedAfterFirstLoad(bandwidthMeter, player);
         PlaybackTimingListener.attachIfDebug(player, "fullscreen");
 
         if (zoomable) {

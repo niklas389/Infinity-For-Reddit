@@ -181,6 +181,12 @@ public class ExoPlayerViewHelper extends ToroPlayerHelper {
         return playable.player.getPlayer();
     }
 
+    /** Format of the video track currently playing, or null when no player is attached. */
+    @Nullable
+    public androidx.media3.common.Format getVideoFormat() {
+        return playable.player != null ? playable.player.getPlayer().getVideoFormat() : null;
+    }
+
     // A proxy, to also hook into ToroPlayerHelper's state change event.
     @UnstableApi
     private class MyEventListeners extends Playable.EventListeners {
