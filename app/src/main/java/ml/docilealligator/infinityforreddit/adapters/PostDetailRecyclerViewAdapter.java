@@ -33,6 +33,7 @@ import androidx.appcompat.content.res.AppCompatResources;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.constraintlayout.widget.ConstraintSet;
 import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
@@ -1066,6 +1067,14 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
     }
 
     private void openMedia(Post post, int galleryItemIndex, long videoProgress) {
+        openMedia(post, galleryItemIndex, videoProgress, Format.NO_VALUE);
+    }
+
+    /**
+     * @param initialVideoBitrate bitrate of the variant the inline player was showing, or
+     *                            {@link Format#NO_VALUE}; passed on so full screen starts on it.
+     */
+    private void openMedia(Post post, int galleryItemIndex, long videoProgress, int initialVideoBitrate) {
         if (canStartActivity) {
             canStartActivity = false;
             if (post.getPostType() == Post.VIDEO_TYPE) {
@@ -1098,6 +1107,9 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
                 intent.putExtra(ViewVideoActivity.EXTRA_POST, post);
                 if (videoProgress > 0) {
                     intent.putExtra(ViewVideoActivity.EXTRA_PROGRESS_SECONDS, videoProgress);
+                }
+                if (initialVideoBitrate > 0) {
+                    intent.putExtra(ViewVideoActivity.EXTRA_INITIAL_VIDEO_BITRATE, initialVideoBitrate);
                 }
                 intent.putExtra(ViewVideoActivity.EXTRA_IS_NSFW, post.isNSFW());
                 mActivity.startActivity(intent);
@@ -1882,7 +1894,9 @@ public class PostDetailRecyclerViewAdapter extends RecyclerView.Adapter<Recycler
 
             fullscreenButton.setOnClickListener(view -> {
                 if (helper != null) {
-                    openMedia(mPost, helper.getLatestPlaybackInfo().getResumePosition());
+                    Format videoFormat = helper.getVideoFormat();
+                    openMedia(mPost, 0, helper.getLatestPlaybackInfo().getResumePosition(),
+                            videoFormat != null ? videoFormat.bitrate : Format.NO_VALUE);
                 } else {
                     openMedia(mPost);
                 }
